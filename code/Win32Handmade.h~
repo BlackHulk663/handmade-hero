@@ -1,0 +1,5 @@
+#if !defined(_WIN32_HANDMADE_)
+#define _WIN32_HANDMADE_
+
+
+#endif
