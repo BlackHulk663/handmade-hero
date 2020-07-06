@@ -29,6 +29,18 @@ typedef int64_t int64;
 
 #include "Win32_Handmade.h"
 
+#if HANDMADE_DEBUG
+#if HANDMADE_WIN32
+#undef ASSERT
+#define ASSERT(exp)\
+	if(!(exp)){DebugBreak();}
+#else
+#define ASSERT(exp)
+#endif
+#else
+#define ASSERT(exp)
+#endif
+
 //====================================================================================
 // NOTE(afb) :: XInputGetState Loading
 #define X_INPUT_GET_STATE(name) DWORD WINAPI name(DWORD dwUserIndex, XINPUT_STATE* pState)
@@ -66,6 +78,87 @@ global_variable direct_sound_create* DirectSoundCreate_ = DirectSoundCreateStub;
 global_variable Win32DIBBuffer GlobalBackBuffer;
 global_variable bool Running;
 global_variable	LPDIRECTSOUNDBUFFER GlobalSecondarySoundBuffer;
+
+
+internal DebugFile
+DEBUGPlatformReadFile(char* fileName)
+{
+	DebugFile result = {};
+	HANDLE fileHandle = CreateFileA(fileName, GENERIC_READ, FILE_SHARE_READ,
+									NULL, OPEN_EXISTING, NULL, NULL);
+	
+	if(fileHandle != INVALID_HANDLE_VALUE)
+	{
+		LARGE_INTEGER fileSize = {};
+		if(GetFileSizeEx(fileHandle, &fileSize))
+		{
+			uint32 fileSize32 = SafeTruncateU64(fileSize.QuadPart);
+			DWORD bytesRead;
+			result.Data = VirtualAlloc(0, fileSize32, MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+
+			if(ReadFile(fileHandle, result.Data, fileSize32, &bytesRead, 0) &&
+			   (fileSize32 == bytesRead))
+			{
+				result.Size = fileSize32;
+			}
+			else
+			{
+				DEBUGPlatformFreeFileMemory(&result);
+			}
+		}
+		else
+		{
+			//NOTE(afb) :: Failure
+		}
+
+		CloseHandle(fileHandle);
+	}
+	else
+	{
+		//NOTE(afb) :: Failure
+	}
+	return (result);
+}
+
+internal void
+DEBUGPlatformFreeFileMemory(DebugFile* file)
+{
+	if(file->Data)
+	{
+		VirtualFree(file->Data, 0, MEM_RELEASE);
+		file->Data = NULL;
+		file->Size = 0;
+	}
+}
+
+internal bool
+DEBUGPlatformWriteFile(char* fileName, uint32 memorySize, void* data)
+{
+	bool result = false;
+	HANDLE fileHandle = CreateFileA(fileName, GENERIC_WRITE, FILE_SHARE_READ,
+									NULL, CREATE_ALWAYS, NULL, NULL);
+	
+	if(fileHandle != INVALID_HANDLE_VALUE)
+	{
+		DWORD bytesWritten;
+		
+		if(WriteFile(fileHandle, data, memorySize, &bytesWritten, NULL))
+		{
+			result = bytesWritten == memorySize;
+		}
+		else
+		{
+			// NOTE(afb) :: Failure
+		}
+		
+		CloseHandle(fileHandle);
+	}
+	else
+	{
+		//NOTE(afb) :: Failure
+	}
+	return result;
+}
 
 
 internal void
@@ -261,7 +354,7 @@ Win32MessgaeProcedure(HWND windowHandle,
 		case (WM_SYSKEYDOWN):
 		case (WM_SYSKEYUP):
 		{
-			uint32 vkCode = wParam;
+			uint32 vkCode = (uint32)wParam;
 
 			bool wasDown = ((lParam & (1 << 30)) != 0);
 			bool isDown = ((lParam & (1 << 31)) == 0);
@@ -305,7 +398,7 @@ Win32MessgaeProcedure(HWND windowHandle,
 				{
 					Running = false;
 				}
-				else if((vkCode == VK_F4) && (lParam & (1 << 29) != 0))
+				else if((vkCode == VK_F4) && ((lParam & (1 << 29)) != 0))
 				{
 					Running = false;
 				}
@@ -426,6 +519,16 @@ Win32ClearSoundBuffer(Win32SoundOutput* soundData)
 	}// Lock
 }
 
+
+internal void
+Win32ProcessXInputDigitalButton(DWORD xInputButtonState, ButtonState* oldState,
+								DWORD buttonBit, ButtonState* newState)
+{
+	newState->EndedDown = (xInputButtonState & buttonBit) == buttonBit;
+	newState->HalfTransitionCount = (oldState->EndedDown != newState->EndedDown ) ? 1 : 0;
+}
+
+
 int CALLBACK
 WinMain(HINSTANCE instance,
 		HINSTANCE prevInstance,
@@ -475,157 +578,251 @@ WinMain(HINSTANCE instance,
 			soundData.runningSampleIndex = 0;
 			soundData.bytesPerSample = sizeof(int16) * 2;
 			soundData.bufferSize = soundData.samplesPerSecond * soundData.bytesPerSample;
-			soundData.latencySampleCount = soundData.samplesPerSecond / 15;
+			soundData.latencySampleCount = (soundData.samplesPerSecond / 15.0f);
 			
 			Win32InitDirectSound(windowHandle, soundData.samplesPerSecond, soundData.bufferSize);
 			Win32ClearSoundBuffer(&soundData);
 
-			int16* samples = (int16*)VirtualAlloc(0, soundData.bufferSize , MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
-			
+			int16* samples = (int16*)VirtualAlloc(0, soundData.bufferSize,
+												  MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+
 			GlobalSecondarySoundBuffer->Play(0, 0, DSBPLAY_LOOPING);			
 			bool soundIsPlaying = true;
-
-
+			// End Sount Output
+			
+			// NOTE(afb) :: Initializing game memory
+#if HANDMADE_DEBUG || HANDMADE_INTERNAL
+			LPVOID baseAddress = (LPVOID)TERABYTE((uint64)2);
+#else
+			LPVOID baseAddress = 0;
+#endif
+			GameMemory gameMemory = {};
+			gameMemory.PersistentMemorySize = MEGABYTE(64);
+			gameMemory.TransientMemorySize = GIGABYTE((uint64)1);
+			uint64 totalSize = gameMemory.PersistentMemorySize + gameMemory.TransientMemorySize;
+			gameMemory.PersistentMemory = VirtualAlloc(baseAddress, (size_t)totalSize,
+													   MEM_RESERVE|MEM_COMMIT, PAGE_READWRITE);
+			gameMemory.TransientMemory = (uint8*)gameMemory.PersistentMemory + gameMemory.PersistentMemorySize;
+			
 			uint64 previousCycle = __rdtsc();
 			LARGE_INTEGER previousCounter = {};
 			QueryPerformanceCounter(&previousCounter);
-			
-			Running = true;
-			while(Running)
+
+			if(samples && gameMemory.PersistentMemory && gameMemory.TransientMemory)
 			{
-				MSG message;
-				// Retrieve messages from queue and dispatch.
-				while(PeekMessage(&message, windowHandle, 0, 0, PM_REMOVE))
+				Running = true;
+				while(Running)
 				{
-					if(message.message == WM_QUIT)
-					{
-						Running = false;
-					}
+					MSG message;
 
-  					// TODO(afb) :: We may need to poll controller more frequently than
-  					// every frame.
-					for (DWORD controllerIndex = 0;
-							controllerIndex < XUSER_MAX_COUNT;
-								controllerIndex++ )
-					{
-						XINPUT_STATE state = {};
+					Input input[2] = {};
+					Input* oldInput = &input[0];
+					Input* newInput = &input[1];
 
-						if(XInputGetState(controllerIndex, &state) == ERROR_SUCCESS)
+					// Retrieve messages from queue and dispatch.
+					while(PeekMessage(&message, windowHandle, 0, 0, PM_REMOVE))
+					{
+						if(message.message == WM_QUIT)
 						{
-							//NOTE(afb):: Controller connected.
-							XINPUT_GAMEPAD* pad = &state.Gamepad;
+							Running = false;
+						}
 
-							//D-PAD
-							bool up = (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP);
-							bool down = (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN);
-							bool left = (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
-							bool right = (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT);
-							// Menu
-							bool start = (pad->wButtons & XINPUT_GAMEPAD_START);
-							bool back = (pad->wButtons & XINPUT_GAMEPAD_BACK);
-							// Bumps
-							bool leftShoulder = (pad->wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER);
-							bool rightShoulder = (pad->wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER);
-							// Buttons
-							bool aButtun = (pad->wButtons & XINPUT_GAMEPAD_A);
-							bool bButton = (pad->wButtons & XINPUT_GAMEPAD_B);
-							bool xButton = (pad->wButtons & XINPUT_GAMEPAD_X);
-							bool yButton = (pad->wButtons & XINPUT_GAMEPAD_Y);
+						// TODO(afb) :: We may need to poll controller more frequently than
+						// every frame.
+						DWORD maxControllerCount = XUSER_MAX_COUNT;
+						if(maxControllerCount > ARRAY_COUNT(input->Controllers))
+						{
+							maxControllerCount = ARRAY_COUNT(input->Controllers);
+						}
+						for (DWORD controllerIndex = 0;
+							 controllerIndex < maxControllerCount;
+							 controllerIndex++ )
+						{
+							XINPUT_STATE state = {};
+						
+							if(XInputGetState(controllerIndex, &state) == ERROR_SUCCESS)
+							{
+								//NOTE(afb):: Controller connected.
+								XINPUT_GAMEPAD* pad = &state.Gamepad;
+							
+								ControllerState* oldController = &(oldInput->Controllers[controllerIndex]);
+								ControllerState* newController = &(newInput->Controllers[controllerIndex]);
+								oldController->IsAnalog = true;
+								newController->IsAnalog = true;
+							
+								f32 leftStickX = (f32)pad->sThumbLX;
+								if(leftStickX < 0.0f)
+								{
+									leftStickX /= 32767.0f;
+								}
+								else
+								{
+									leftStickX /= 32768.0f;
+								}
+							
+								f32 leftStickY = (f32)pad->sThumbLY;
+								if(leftStickY < 0.0f)
+								{
+									leftStickY /= 32767.0f;
+								}
+								else
+								{
+									leftStickY /= 32768.0f;
+								}
+							
+								newController->StartX = oldController->EndX;
+								newController->StartY = oldController->EndY;
+							
+								// TODO(afb) :: Deadzone proccesing
+								// TODO(afb) :: Min Max macros
+								newController->MinX = newController->MaxX = newController->EndX = leftStickX;
+								newController->MinY = newController->MaxY = newController->EndY = leftStickY;
+							
+								// TODO(afb) :: Right Stick
+								int16 rightStickX = pad->sThumbRX;
+								int16 rightStickY = pad->sThumbRY;
+							
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->Down,
+																XINPUT_GAMEPAD_A,
+																&newController->Down);
 
-							int16 leftStickX = pad->sThumbLX;
-							int16 leftStickY = pad->sThumbLY;
-							int16 rightStickX = pad->sThumbRX;
-							int16 rightStickY = pad->sThumbRY;
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->Right,
+																XINPUT_GAMEPAD_B,
+																&newController->Right);
+							
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->Left,
+																XINPUT_GAMEPAD_X,
+																&newController->Left);
+							
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->Up,
+																XINPUT_GAMEPAD_Y,
+																&newController->Up);
+							
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->LeftShoulder,
+																XINPUT_GAMEPAD_LEFT_SHOULDER,
+																&newController->LeftShoulder);
+							
+								Win32ProcessXInputDigitalButton(pad->wButtons,
+																&oldController->RightShoulder,
+																XINPUT_GAMEPAD_RIGHT_SHOULDER,
+																&newController->RightShoulder);
+							
+
+/*							
+								//D-PAD
+								bool up = (pad->wButtons & XINPUT_GAMEPAD_DPAD_UP);
+								bool down = (pad->wButtons & XINPUT_GAMEPAD_DPAD_DOWN);
+								bool left = (pad->wButtons & XINPUT_GAMEPAD_DPAD_LEFT);
+								bool right = (pad->wButtons & XINPUT_GAMEPAD_DPAD_RIGHT);
+							
+							
+								// Menu
+								bool start = (pad->wButtons & XINPUT_GAMEPAD_START);
+								bool back = (pad->wButtons & XINPUT_GAMEPAD_BACK);
+*/							
+							}
+							else
+							{
+								//NOTE(afb) :: Controller not connected.
+							}
+						} // Xinput For loop
+
+						TranslateMessage(&message);
+						DispatchMessageA(&message);
+				
+					} // While peek message
+				
+					// If there are no messgaes still write to the buffer and update the DIB
+					HDC deviceContext = GetDC(windowHandle);
+					Win32WindowDimension dim = Win32GetWindowDimension(windowHandle);
+					Win32DisplayBufferToWindow(deviceContext, &GlobalBackBuffer, 0, 0, dim.Width, dim.Height);
+					ReleaseDC(windowHandle ,deviceContext);
+				
+				
+					// NOTE(afb) :: Direct Sound Output Test
+					DWORD writeCursor = 0;
+					DWORD playCursor = 0;
+					DWORD byteToLock = 0;
+					DWORD bytesToWrite = 0;
+					DWORD targetCursor = 0;
+					bool soundIsValid = false;
+				
+					if(SUCCEEDED(GlobalSecondarySoundBuffer->GetCurrentPosition(&playCursor, &writeCursor)))
+					{
+					
+						byteToLock = (soundData.runningSampleIndex * soundData.bytesPerSample) % soundData.bufferSize;
+						targetCursor =
+							(int32)(playCursor + soundData.latencySampleCount * soundData.bytesPerSample) % soundData.bufferSize;
+					
+						if(byteToLock > targetCursor)
+						{
+							bytesToWrite = soundData.bufferSize - byteToLock;// + playCursor;
+							bytesToWrite += targetCursor;
 						}
 						else
 						{
-							//NOTE(afb) :: Controller not connected.
+							bytesToWrite = targetCursor - byteToLock;
 						}
-
-  					}
-
-					TranslateMessage(&message);
-					DispatchMessageA(&message);
-				}
-
-				// If there are no messgaes still write to the buffer and update the DIB
-
-				HDC deviceContext = GetDC(windowHandle);
-				Win32WindowDimension dim = Win32GetWindowDimension(windowHandle);
-				Win32DisplayBufferToWindow(deviceContext, &GlobalBackBuffer, 0, 0, dim.Width, dim.Height);
-				ReleaseDC(windowHandle ,deviceContext);
-
-
-				// NOTE(afb) :: Direct Sound Output Test
-				DWORD writeCursor;
-				DWORD playCursor;
-				DWORD byteToLock;
-				DWORD bytesToWrite;
-				DWORD targetCursor;
-				bool soundIsValid = false;
-
-				if(SUCCEEDED(GlobalSecondarySoundBuffer->GetCurrentPosition(&playCursor, &writeCursor)))
-				{
 					
-					byteToLock = (soundData.runningSampleIndex * soundData.bytesPerSample) % soundData.bufferSize;
-					targetCursor =
-						(int32)(playCursor + soundData.latencySampleCount * soundData.bytesPerSample) % soundData.bufferSize;
-					
-					if(byteToLock > targetCursor)
-					{
-						bytesToWrite = soundData.bufferSize - byteToLock;// + playCursor;
-						bytesToWrite += targetCursor;
+						soundIsValid = true;
 					}
-					else
-					{
-						bytesToWrite = targetCursor - byteToLock;
-					}
-
-					soundIsValid = true;
-				}
 				
-				//NOTE(afb) :: Sound
-				SoundBuffer soundBuffer = {};
-				soundBuffer.SamplesPerSecond = soundData.samplesPerSecond;  
-				soundBuffer.SampleCount = bytesToWrite / soundData.bytesPerSample;
-				soundBuffer.Data = samples;
+					//NOTE(afb) :: Sound
+					SoundBuffer soundBuffer = {};
+					soundBuffer.SamplesPerSecond = soundData.samplesPerSecond;  
+					soundBuffer.SampleCount = bytesToWrite / soundData.bytesPerSample;
+					soundBuffer.Data = samples;
 				
-				//NOTE(afb) :: Rendering 
-				GameOffScreenBuffer screenBuffer = {};
-				screenBuffer.Memory = GlobalBackBuffer.Memory;
-				screenBuffer.Width = GlobalBackBuffer.Width;
-				screenBuffer.Height = GlobalBackBuffer.Height;
-				screenBuffer.Pitch = GlobalBackBuffer.Pitch;
-				screenBuffer.BytesPerPixel = GlobalBackBuffer.BytesPerPixel;
-				UpdateAndRender(&screenBuffer, &soundBuffer);
-
-
-				if(soundIsValid)
-				{					
-					Win32FillSoundBuffer(&soundData, bytesToWrite, byteToLock, &soundBuffer);
-				} // soundIsValid
-
-
-				// NOTE(afb) :: Frame Counter Calculation
-				uint64 endCycle = __rdtsc();
-				int64 cyclesElapsed = endCycle - previousCycle;
-				int32 megaCyclesPerFrame = (int32)cyclesElapsed / (1000 * 1000);
+					//NOTE(afb) :: Rendering 
+					GameOffScreenBuffer screenBuffer = {};
+					screenBuffer.Memory = GlobalBackBuffer.Memory;
+					screenBuffer.Width = GlobalBackBuffer.Width;
+					screenBuffer.Height = GlobalBackBuffer.Height;
+					screenBuffer.Pitch = GlobalBackBuffer.Pitch;
+					screenBuffer.BytesPerPixel = GlobalBackBuffer.BytesPerPixel;
+					UpdateAndRender(&gameMemory, newInput, &screenBuffer, &soundBuffer);
 				
-				LARGE_INTEGER endCounter = {};
-				QueryPerformanceCounter(&endCounter);
-
-				int64 counterElapsed  = endCounter.QuadPart - previousCounter.QuadPart;
-				// Time is in milliiseconds
-				int32 timeElapsedPerFrame = (int32)((counterElapsed*1000) / perfFrequency);
-				int32 fps = 1000/timeElapsedPerFrame;
+				
+					if(soundIsValid)
+					{					
+						Win32FillSoundBuffer(&soundData, bytesToWrite, byteToLock, &soundBuffer);
+					} // soundIsValid
+				
+				
+					// NOTE(afb) :: Frame Counter Calculation
+					uint64 endCycle = __rdtsc();
+					int64 cyclesElapsed = endCycle - previousCycle;
+					int32 megaCyclesPerFrame = (int32)cyclesElapsed / (1000 * 1000);
+				
+					LARGE_INTEGER endCounter = {};
+					QueryPerformanceCounter(&endCounter);
+				
+					int64 counterElapsed  = endCounter.QuadPart - previousCounter.QuadPart;
+					// Time is in milliiseconds
+					int32 timeElapsedPerFrame = (int32)((counterElapsed*1000) / perfFrequency);
+					int32 fps = 1000/timeElapsedPerFrame;
 #if 0
-				char buffer[256];
-				wsprintf(buffer, "%dms, %dfps, %dMc/f\n", timeElapsedPerFrame, fps, megaCyclesPerFrame);
-				OutputDebugStringA(buffer);
+					char buffer[256];
+					wsprintf(buffer, "%dms, %dfps, %dMc/f\n", timeElapsedPerFrame, fps, megaCyclesPerFrame);
+					OutputDebugStringA(buffer);
 #endif			
-				previousCycle = endCycle;
-				previousCounter = endCounter;
-			}// Running Loop
+					previousCycle = endCycle;
+					previousCounter = endCounter;
+				
+					Input* temp = oldInput;
+					oldInput = newInput;
+					newInput = temp;
+				}// While Running Loop
+			}// If memory initialized
+			else
+			{
+				// TODO(afb) :: Error Logging
+			}
 			VirtualFree(samples, 0, MEM_RELEASE);
 		}
 		else
@@ -637,6 +834,6 @@ WinMain(HINSTANCE instance,
 	{
 		// TODO(afb) :: Error Logging
 	}
-		
+	
 	return(0);
 }

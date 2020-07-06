@@ -1,5 +1,13 @@
 #include "Handmade.h"
 
+inline uint32
+SafeTruncateU64(uint64 value)
+{
+	ASSERT(value <= 0xFFFFFFFF);
+	uint32 result = (uint32)value;
+	return result;
+}
+
 internal void
 RenderWeirdGradient(GameOffScreenBuffer* buffer, int xOffset, int yOffset)
 {
@@ -10,9 +18,12 @@ RenderWeirdGradient(GameOffScreenBuffer* buffer, int xOffset, int yOffset)
 		uint32* pixel = (uint32*)row;
 		for (int x = 0; x < buffer->Width; x++)
 		{
-			int32 green = ((xOffset + x) << 8);
-			int32 blue = (yOffset + y);
-			*pixel = green | blue;
+			// NOTE(afb) :: Changed from gradient because my screen
+			// equal big gayyy.
+			int32 red = 232 << 16;
+			int32 green = (xOffset + 228) << 8;
+			int32 blue = (yOffset + 155);
+			*pixel = green | blue | red;
 			pixel++;
 		}
 		row += buffer->Pitch;
@@ -43,12 +54,45 @@ OutputSound(SoundBuffer* soundBuffer, int hz)
 }
 
 internal void
-UpdateAndRender(GameOffScreenBuffer* buffer, SoundBuffer* soundBuffer)
+UpdateAndRender(GameMemory* gameMemory, Input* input, GameOffScreenBuffer* buffer,
+				SoundBuffer* soundBuffer)
 {
-	local_persist int xOffset = 0;
-	local_persist int yOffset = 0;
-	local_persist int toneHz = 256;
+	ASSERT(gameMemory->PersistentMemorySize >= sizeof(GameState));
+	
+	DebugFile file = {};
+	GameState* state = (GameState*)gameMemory->PersistentMemory;
+	if(!gameMemory->IsInitialized)
+	{
+		char* fileName = __FILE__;
+		file = DEBUGPlatformReadFile(fileName);
+		if(file.Data)
+		{
+			DEBUGPlatformWriteFile("test.out", file.Size, file.Data);
+			DEBUGPlatformFreeFileMemory(&file);
+		}
 		
-	OutputSound(soundBuffer, toneHz);
-	RenderWeirdGradient(buffer, xOffset, yOffset);
+		state->ToneHz = 256;
+		gameMemory->IsInitialized = true;
+	}
+	
+	ControllerState* input0 = &input->Controllers[0];
+	if(input0->IsAnalog)
+	{
+		// NOTE(afb) :: Analog input tuning
+		state->ToneHz = 256 + (int)(128.0f * input0->EndY);
+		state->YOffset += (int)(4.0f * input0->EndX);
+	}
+	else
+	{
+		// NOTE(afb) :: Digital input tuning
+	}
+
+	//Input.AButtonalfTransitionCount;
+	if(input0->Down.EndedDown)
+	{
+		state->XOffset++;
+	}
+
+	OutputSound(soundBuffer, state->ToneHz);
+	RenderWeirdGradient(buffer, state->XOffset, state->YOffset);
 }
