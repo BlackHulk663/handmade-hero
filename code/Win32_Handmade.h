@@ -20,11 +20,19 @@ struct Win32WindowDimension
 
 struct Win32SoundOutput
 {
-	int32 samplesPerSecond;
-	int32 bytesPerSample;
-	int32 bufferSize;
-	f32 latencySampleCount;
-	uint32 runningSampleIndex;
+	int32 SamplesPerSecond;
+	int32 BytesPerSample;
+	int32 BufferSize;
+	f32 LatencySampleCount; // Amount of samples of latency for the sound
+	uint32 RunningSampleIndex; // Sample to write at
+	//TODO(afb) :: Maybe have a bytes per sc field?
+	//TODO(afb) :: RunningSampleIndex should maybe be in mytes
+};
+
+struct Win32DebugSoundMarker
+{
+	DWORD PlayCursor;
+	DWORD WriteCursor;
 };
 
 #endif

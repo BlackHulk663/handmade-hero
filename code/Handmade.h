@@ -86,38 +86,47 @@ struct ButtonState
 
 struct ControllerState
 {
+	bool IsConnected;
 	bool IsAnalog;
-	
-	f32 StartX;
-	f32 EndX;
-	f32 MinX;
-	f32 MaxX;
-	
-	f32 StartY;
-	f32 EndY;
-	f32 MinY;
-	f32 MaxY;
+	f32 LeftStickAverageY;
+	f32 LeftStickAverageX;
 	
 	union
 	{
-		ButtonState buttons[6];
+		ButtonState Buttons[12];
 		struct
 		{
-			ButtonState Up;
-			ButtonState Down;
-			ButtonState Left;
-			ButtonState Right;
+			ButtonState MoveUp;
+			ButtonState MoveDown;
+			ButtonState MoveLeft;
+			ButtonState MoveRight;
+			
+			ButtonState ActionUp;
+			ButtonState ActionDown;
+			ButtonState ActionLeft;
+			ButtonState ActionRight;
+		
 			ButtonState RightShoulder;
 			ButtonState LeftShoulder;
+
+			// NOTE(afb) :: All buttons must be added above this line
+			ButtonState Start;
+			ButtonState Back;
 		};
 	};
 };
 
 struct Input
 {
-	ControllerState Controllers[4];
+	ControllerState Controllers[5];
 };
 
+inline ControllerState*
+GetController(Input* input, uint32 index)
+{
+	ASSERT(index < ARRAY_COUNT(input->Controllers));
+	return &input->Controllers[index];
+}
 
 internal void UpdateAndRender(Input* input, GameOffScreenBuffer* buffer,
 							  SoundBuffer* soundBuffer);
